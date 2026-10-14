@@ -1,6 +1,8 @@
 
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from pydantic import BaseModel
+from typing import Annotated
+from fastapi.openapi.utils import get_openapi
 
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -15,6 +17,40 @@ from app.services.semantic_similarity import (
 
 
 app = FastAPI(title="PDF Plagiarism Checker")
+
+def custom_openapi():
+    if app.openapi_schema:
+        return app.openapi_schema
+
+    schema = get_openapi(
+        title=app.title,
+        version="0.1.0",
+        routes=app.routes,
+    )
+
+    schema["openapi"] = "3.0.3"
+
+    request_schema = schema["paths"]["/compare"]["post"]["requestBody"][
+        "content"
+    ]["multipart/form-data"]["schema"]
+
+    body_name = request_schema["$ref"].split("/")[-1]
+    body_schema = schema["components"]["schemas"][body_name]
+
+    body_schema["properties"]["files"] = {
+        "type": "array",
+        "title": "Files",
+        "items": {
+            "type": "string",
+            "format": "binary",
+        },
+    }
+
+    app.openapi_schema = schema
+    return app.openapi_schema
+
+
+app.openapi = custom_openapi
 
 app.add_middleware(
     CORSMiddleware,
@@ -45,7 +81,7 @@ def home():
 
 
 @app.post("/compare", response_model=list[ComparisonResult])
-async def compare_pdfs(files: list[UploadFile] = File(...)):
+async def compare_pdfs( files: Annotated[list[UploadFile], File(description="Upload two or more PDF files")]):
     # Validate the number of uploaded files.
     if len(files) < 2:
         raise HTTPException(

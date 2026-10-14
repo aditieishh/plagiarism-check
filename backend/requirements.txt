@@ -4,5 +4,7 @@ python-multipart
 pdfplumber
 scikit-learn
 numpy
-sentence-transformers
+
 pypdf
+google-genai
+python-dotenv

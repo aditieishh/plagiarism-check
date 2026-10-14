@@ -1,23 +1,32 @@
 
+import os
 import re
 from functools import lru_cache
 
-from sentence_transformers import SentenceTransformer, util
+import numpy as np
+from google import genai
+from google.genai import types
+from dotenv import load_dotenv
+
+load_dotenv()
+
+MODEL_NAME = "gemini-embedding-001"
+BATCH_SIZE = 50
 
 
 @lru_cache(maxsize=1)
-def load_model():
-    """Load the model once and reuse it."""
-    return SentenceTransformer("all-MiniLM-L6-v2")
+def get_client():
+    api_key = os.getenv("GEMINI_API_KEY")
+    if not api_key:
+        raise RuntimeError("GEMINI_API_KEY is not configured.")
+    return genai.Client(api_key=api_key)
 
 
 def split_into_sentences(text: str) -> list[str]:
-    """Split text into sentences and ignore short fragments."""
     if not text or not text.strip():
         return []
 
     sentences = re.split(r"(?<=[.!?])\s+", text.strip())
-
     return [
         sentence.strip()
         for sentence in sentences
@@ -25,46 +34,62 @@ def split_into_sentences(text: str) -> list[str]:
     ][:100]
 
 
+def _get_embeddings(sentences: list[str]) -> np.ndarray:
+    client = get_client()
+    all_embeddings = []
+
+    for start in range(0, len(sentences), BATCH_SIZE):
+        batch = sentences[start:start + BATCH_SIZE]
+
+        response = client.models.embed_content(
+            model=MODEL_NAME,
+            contents=batch,
+            config=types.EmbedContentConfig(
+                task_type="SEMANTIC_SIMILARITY",
+                output_dimensionality=768,
+            ),
+        )
+
+        if not response.embeddings:
+            raise RuntimeError("Gemini returned no embeddings.")
+
+        all_embeddings.extend(
+            embedding.values for embedding in response.embeddings
+        )
+
+    embeddings = np.asarray(all_embeddings, dtype=np.float32)
+    norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
+    return embeddings / np.maximum(norms, 1e-12)
+
+
+def _similarity_matrix(
+    sentences1: list[str],
+    sentences2: list[str],
+) -> np.ndarray:
+    # Embed both groups in the same request sequence.
+    embeddings = _get_embeddings(sentences1 + sentences2)
+    split_at = len(sentences1)
+
+    return embeddings[:split_at] @ embeddings[split_at:].T
+
+
 def calculate_semantic_similarity(
     text1: str,
     text2: str,
 ) -> float:
-    """Calculate document-level semantic similarity as a percentage."""
     sentences1 = split_into_sentences(text1)
     sentences2 = split_into_sentences(text2)
 
     if not sentences1 or not sentences2:
         return 0.0
 
-    model = load_model()
-
-    embeddings1 = model.encode(
-        sentences1,
-        convert_to_tensor=True,
-        normalize_embeddings=True,
-    )
-    embeddings2 = model.encode(
-        sentences2,
-        convert_to_tensor=True,
-        normalize_embeddings=True,
-    )
-
-    similarity_matrix = util.cos_sim(embeddings1, embeddings2)
-
-    # Best matching sentence in document 2 for every sentence in document 1.
-    best_matches1 = similarity_matrix.max(dim=1).values
-
-    # Best matching sentence in document 1 for every sentence in document 2.
-    best_matches2 = similarity_matrix.max(dim=0).values
-
+    similarity = _similarity_matrix(sentences1, sentences2)
     score = (
-        best_matches1.mean().item()
-        + best_matches2.mean().item()
+        similarity.max(axis=1).mean()
+        + similarity.max(axis=0).mean()
     ) / 2
 
-    # Clamp the result to the range 0–100.
-    return round(max(0.0, min(1.0, score)) * 100, 2)
-
+    return round(float(np.clip(score, 0.0, 1.0)) * 100, 2)
 
 
 def find_semantic_matches(
@@ -72,13 +97,6 @@ def find_semantic_matches(
     text2: str,
     threshold: float = 0.65,
 ) -> list[dict]:
-    """
-    Find strong semantic sentence pairs without reusing sentences.
-
-    The threshold is a cosine similarity value between -1 and 1.
-    A threshold of 0.65 means candidate matches must score at least 65
-    on the returned percentage scale.
-    """
     if not 0.0 <= threshold <= 1.0:
         raise ValueError("threshold must be between 0.0 and 1.0")
 
@@ -88,62 +106,31 @@ def find_semantic_matches(
     if not sentences1 or not sentences2:
         return []
 
-    model = load_model()
+    similarity = _similarity_matrix(sentences1, sentences2)
+    rows, cols = np.where(similarity >= threshold)
 
-    embeddings1 = model.encode(
-        sentences1,
-        convert_to_tensor=True,
-        normalize_embeddings=True,
-    )
-    embeddings2 = model.encode(
-        sentences2,
-        convert_to_tensor=True,
-        normalize_embeddings=True,
-    )
-
-    similarity_matrix = util.cos_sim(embeddings1, embeddings2)
-
-    # Collect every candidate pair above the threshold.
-    candidates = []
-
-    for i, sentence1 in enumerate(sentences1):
-        for j, sentence2 in enumerate(sentences2):
-            score = similarity_matrix[i, j].item()
-
-            if score >= threshold:
-                candidates.append({
-                    "index1": i,
-                    "index2": j,
-                    "sentence1": sentence1,
-                    "sentence2": sentence2,
-                    "similarity_score": round(score * 100, 2),
-                })
-
-    # Consider the strongest candidate pairs first.
-    candidates.sort(
-        key=lambda match: match["similarity_score"],
+    candidates = sorted(
+        zip(rows.tolist(), cols.tolist()),
+        key=lambda pair: similarity[pair[0], pair[1]],
         reverse=True,
     )
 
     matches = []
-    used_sentences1 = set()
-    used_sentences2 = set()
+    used1, used2 = set(), set()
 
-    # Greedily select pairs without reusing either sentence.
-    for candidate in candidates:
-        i = candidate["index1"]
-        j = candidate["index2"]
-
-        if i in used_sentences1 or j in used_sentences2:
+    for i, j in candidates:
+        if i in used1 or j in used2:
             continue
 
-        matches.append({
-            "sentence1": candidate["sentence1"],
-            "sentence2": candidate["sentence2"],
-            "similarity_score": candidate["similarity_score"],
-        })
+        used1.add(i)
+        used2.add(j)
 
-        used_sentences1.add(i)
-        used_sentences2.add(j)
+        matches.append({
+            "sentence1": sentences1[i],
+            "sentence2": sentences2[j],
+            "similarity_score": round(
+                float(similarity[i, j]) * 100, 2
+            ),
+        })
 
     return matches

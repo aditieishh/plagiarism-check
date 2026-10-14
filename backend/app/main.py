@@ -32,7 +32,7 @@ class ComparisonResult(BaseModel):
     file1: str
     file2: str
     similarity_percentage: float
-    semantic_similarity_percentage: float
+    semantic_similarity_percentage: float | None
     matching_sentences: list[dict]
     semantic_matches: list[dict]
 

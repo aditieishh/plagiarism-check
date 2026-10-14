@@ -10,7 +10,7 @@ import {
 } from "react-router-dom";
 import "./App.css";
 
-const API_URL = "http://127.0.0.1:8000/compare";
+const API_URL = "https://plagiarism-check-ajak.onrender.com";
 const MAX_FILES = 10;
 const MAX_FILE_SIZE = 5 * 1024 * 1024;
 
@@ -113,10 +113,10 @@ function UploadPage() {
     });
 
     try {
-      const response = await fetch(API_URL, {
+      const response = await fetch(`${API_URL}/compare`, {
         method: "POST",
         body: formData,
-      });
+        });
 
       const data = await response.json();
 

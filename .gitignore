@@ -1,0 +1,10 @@
+
+# Project-specific environments
+backend/venv39/
+backend/venv-new/
+frontend/node_modules/
+backend/.pytest_cache/
+backend/**/__pycache__/
+frontend/dist/
+frontend/.git-backup/
+.DS_Store
